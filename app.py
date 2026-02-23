@@ -403,7 +403,7 @@ with right:
                     st.write(f"New items count: {new_count}")
 
                     st.write("**New Items preview (first 50 rows)**")
-                    st.dataframe((new_items_df or pd.DataFrame()).head(50), use_container_width=True)
+                    st.dataframe((new_items_df if new_items_df is not None else pd.DataFrame()).head(50), use_container_width=True)
 
             except Exception as e:
                 st.error(f"Export failed: {e}")
