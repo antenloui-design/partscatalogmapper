@@ -10,6 +10,7 @@
 #   pip install streamlit pandas openpyxl
 
 import io
+import zipfile
 from datetime import datetime
 
 import pandas as pd
@@ -147,46 +148,36 @@ def compare_and_build_exports(df_mapped: pd.DataFrame, df_catalog: pd.DataFrame)
     catalog_lookup = df_catalog_updated.drop_duplicates(subset=["ItemCode"], keep="last").set_index("ItemCode")
     mapped_lookup = df_mapped_local.drop_duplicates(subset=["ItemCode"], keep="last").set_index("ItemCode")
 
-    catalog_codes = set(catalog_lookup.index.astype(str).tolist())
-    mapped_codes = set(mapped_lookup.index.astype(str).tolist())
-
-    both_codes = catalog_codes & mapped_codes
-    new_codes = mapped_codes - catalog_codes
+    # Index operations scale better than set/list conversions on very large catalogs.
+    both_codes = catalog_lookup.index.intersection(mapped_lookup.index, sort=False)
+    new_codes = mapped_lookup.index.difference(catalog_lookup.index, sort=False)
 
     # Update prices where codes exist in both and prices differ
     updated_count = 0
     codes_to_update = []
 
-    if both_codes:
-        both_list = list(both_codes)
-
-        catalog_pp = to_num(catalog_lookup.loc[both_list, "PurchasePrice"])
-        catalog_sp = to_num(catalog_lookup.loc[both_list, "SalesPrice"])
-        mapped_pp = to_num(mapped_lookup.loc[both_list, "PurchasePrice"])
-        mapped_sp = to_num(mapped_lookup.loc[both_list, "SalesPrice"])
+    if len(both_codes) > 0:
+        catalog_pp = to_num(catalog_lookup.loc[both_codes, "PurchasePrice"])
+        catalog_sp = to_num(catalog_lookup.loc[both_codes, "SalesPrice"])
+        mapped_pp = to_num(mapped_lookup.loc[both_codes, "PurchasePrice"])
+        mapped_sp = to_num(mapped_lookup.loc[both_codes, "SalesPrice"])
 
         needs_update = (catalog_pp.ne(mapped_pp)) | (catalog_sp.ne(mapped_sp))
         codes_to_update = needs_update[needs_update].index.astype(str).tolist()
 
         if codes_to_update:
-            mask = df_catalog_updated["ItemCode"].isin(codes_to_update)
-
-            pp_map = mapped_lookup.loc[codes_to_update, "PurchasePrice"].astype(object).to_dict()
-            sp_map = mapped_lookup.loc[codes_to_update, "SalesPrice"].astype(object).to_dict()
-
-            df_catalog_updated.loc[mask, "PurchasePrice"] = df_catalog_updated.loc[mask, "ItemCode"].map(pp_map).astype(
-                object
-            )
-            df_catalog_updated.loc[mask, "SalesPrice"] = df_catalog_updated.loc[mask, "ItemCode"].map(sp_map).astype(
-                object
-            )
+            # Index-aligned assignment avoids large dict/map overhead.
+            catalog_indexed = df_catalog_updated.set_index("ItemCode", drop=False)
+            catalog_indexed.loc[codes_to_update, "PurchasePrice"] = mapped_lookup.loc[codes_to_update, "PurchasePrice"]
+            catalog_indexed.loc[codes_to_update, "SalesPrice"] = mapped_lookup.loc[codes_to_update, "SalesPrice"]
+            df_catalog_updated = catalog_indexed.reset_index(drop=True)
 
             updated_count = len(codes_to_update)
 
     # Build New Items sheet
     new_items_df = pd.DataFrame()
-    if new_codes:
-        df_new = mapped_lookup.loc[list(new_codes)].reset_index()
+    if len(new_codes) > 0:
+        df_new = mapped_lookup.loc[new_codes].reset_index()
 
         new_items_df = pd.DataFrame(
             {
@@ -215,15 +206,13 @@ def compare_and_build_exports(df_mapped: pd.DataFrame, df_catalog: pd.DataFrame)
     return df_catalog_updated, new_items_df, updated_count, len(new_codes)
 
 
-def make_excel_bytes(df_catalog_updated: pd.DataFrame, new_items_df: pd.DataFrame) -> bytes:
+def make_excel_bytes(df_export: pd.DataFrame, sheet_name: str) -> bytes:
     """
-    Writes Catalog + New Items to an in-memory Excel file using openpyxl.
+    Writes a single DataFrame to an in-memory Excel file using openpyxl.
     """
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_catalog_updated.to_excel(writer, index=False, sheet_name="Catalog")
-        # Always include sheet for consistency
-        (new_items_df if new_items_df is not None else pd.DataFrame()).to_excel(writer, index=False, sheet_name="New Items")
+        df_export.to_excel(writer, index=False, sheet_name=sheet_name)
     output.seek(0)
     return output.read()
 
@@ -319,7 +308,7 @@ with left:
                 st.session_state.mapping[field] = default
 
             chosen = st.selectbox(
-                f"{field} ← Source column",
+                f"{field}",
                 options=source_cols,
                 index=source_cols.index(default),
                 key=f"map_{field}",
@@ -329,7 +318,7 @@ with left:
         st.caption("MarinaLocationId is taken from the sidebar input. AdditionDatetime is generated (sidebar).")
 
         # Build df_mapped
-        if st.button("Create df_mapped", type="primary", use_container_width=True):
+        if st.button("Create Mapped Fields", type="primary", use_container_width=True):
             if st.session_state.mapping.get("ItemCode", "(not mapped)") == "(not mapped)":
                 st.error("ItemCode must be mapped to proceed.")
             else:
@@ -370,28 +359,41 @@ with right:
     st.divider()
 
     if df_mapped is None:
-        st.warning("Create df_mapped first (Step 1).")
+        st.warning("Create Mapped Fields first (Step 1).")
     elif df_catalog is None:
         st.warning("Upload Marina catalog first (Step 2).")
     else:
         # Export button
-        if st.button("Export Updated Catalog + New Items (Excel)", type="primary", use_container_width=True):
+        if st.button("Export Updated Catalog + New Items", type="primary", use_container_width=True):
             try:
                 df_catalog_updated, new_items_df, updated_count, new_count = compare_and_build_exports(
                     df_mapped=df_mapped,
                     df_catalog=df_catalog,
                 )
 
-                xlsx_bytes = make_excel_bytes(df_catalog_updated, new_items_df)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                catalog_filename = f"updated_catalog_{ts}.xlsx"
+                new_items_filename = f"new_items_{ts}.xlsx"
+                zip_filename = f"catalog_exports_{ts}.zip"
 
-                filename = f"catalog_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                catalog_xlsx_bytes = make_excel_bytes(df_catalog_updated, "Catalog")
+                new_items_export_df = new_items_df if new_items_df is not None else pd.DataFrame()
+                new_items_xlsx_bytes = make_excel_bytes(new_items_export_df, "New Items")
+
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    zf.writestr(catalog_filename, catalog_xlsx_bytes)
+                    zf.writestr(new_items_filename, new_items_xlsx_bytes)
+                zip_buffer.seek(0)
+                zip_bytes = zip_buffer.read()
+
                 st.success(f"Export ready. Updated items: {updated_count} | New items: {new_count}")
 
                 st.download_button(
-                    label="Download Excel Export",
-                    data=xlsx_bytes,
-                    file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    label="Download Both Files (ZIP)",
+                    data=zip_bytes,
+                    file_name=zip_filename,
+                    mime="application/zip",
                     use_container_width=True,
                 )
 
