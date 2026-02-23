@@ -181,7 +181,6 @@ def compare_and_build_exports(df_mapped: pd.DataFrame, df_catalog: pd.DataFrame)
 
         new_items_df = pd.DataFrame(
             {
-                "Id": ["*"] * len(df_new),
                 "Supplier": df_new.get("Supplier", ""),
                 "ItemCode": df_new.get("ItemCode", ""),
                 "Description": df_new.get("Description", ""),
@@ -189,14 +188,8 @@ def compare_and_build_exports(df_mapped: pd.DataFrame, df_catalog: pd.DataFrame)
                 "SalesPrice": df_new.get("SalesPrice", ""),
                 "SV_ManufacturerId": df_new.get("SV_ManufacturerId", ""),
                 "ListCategory": df_new.get("ListCategory", ""),
-                # Insert RecordStatusId between ListCategory and MarinaLocationId
-                "RecordStatusId": [1] * len(df_new),
                 "MarinaLocationId": df_new.get("MarinaLocationId", ""),
                 "AdditionDatetime": df_new.get("AdditionDatetime", ""),
-                # Append after AdditionDatetime
-                "ItemMaster_Id": ["NULL"] * len(df_new),
-                "AspNetUser_Id": ["NULL"] * len(df_new),
-                "SupersededItemCode": ["NULL"] * len(df_new),
             }
         )
 
