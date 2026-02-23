@@ -89,25 +89,25 @@ def build_df_mapped(df_source: pd.DataFrame, mapping: dict, marina_location_id: 
     Step 1 – Source File Mapping -> df_mapped with STANDARD_HEADERS.
     Dedupes safely by ItemCode (keep last), drops blank ItemCodes.
     """
-    out = {}
+    # Build with vectorized assignments for better large-file performance.
+    df_mapped = pd.DataFrame(index=df_source.index)
 
     for field in STANDARD_HEADERS:
         if field in ("MarinaLocationId", "AdditionDatetime"):
             continue
 
         src_col = mapping.get(field, "(not mapped)")
-        if not src_col or src_col == "(not mapped)":
-            out[field] = pd.Series([""] * len(df_source), dtype=object)
+        if src_col and src_col != "(not mapped)":
+            df_mapped[field] = df_source[src_col]
         else:
-            out[field] = df_source[src_col].astype(object)
+            df_mapped[field] = ""
 
-    out["MarinaLocationId"] = pd.Series([marina_location_id] * len(df_source), dtype=object)
-    out["AdditionDatetime"] = pd.Series([addition_dt] * len(df_source), dtype=object)
-
-    df_mapped = pd.DataFrame(out, columns=STANDARD_HEADERS)
+    df_mapped["MarinaLocationId"] = marina_location_id
+    df_mapped["AdditionDatetime"] = addition_dt
+    df_mapped = df_mapped.reindex(columns=STANDARD_HEADERS)
 
     df_mapped["ItemCode"] = normalize_itemcode(df_mapped["ItemCode"])
-    df_mapped = df_mapped[df_mapped["ItemCode"].astype(str).str.strip() != ""].copy()
+    df_mapped = df_mapped[df_mapped["ItemCode"] != ""].copy()
 
     # Safe dedupe: keep last occurrence for a given ItemCode
     df_mapped = df_mapped.drop_duplicates(subset=["ItemCode"], keep="last").reset_index(drop=True)
@@ -374,7 +374,8 @@ with right:
                 new_items_xlsx_bytes = make_excel_bytes(new_items_export_df, "New Items")
 
                 zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                # Use STORE (no compression) to reduce CPU time on large exports.
+                with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_STORED) as zf:
                     zf.writestr(catalog_filename, catalog_xlsx_bytes)
                     zf.writestr(new_items_filename, new_items_xlsx_bytes)
                 zip_buffer.seek(0)
